@@ -4,10 +4,15 @@
 [![GitHub License](https://img.shields.io/github/license/alexey-pelykh/UVCCamera)](./LICENSE)
 [![Pub Version](https://img.shields.io/pub/v/uvccamera)](https://pub.dev/packages/uvccamera)
 
-A USB Video Class (UVC) camera plugin for Flutter based on [UVCCamera](https://uvccamera.org) library for Android,
-brought to you by [Alexey Pelykh](https://alexey-pelykh.com).
+A USB Video Class (UVC) camera plugin for Flutter based on [UVCCamera](https://uvccamera.org) library for Android
+with an iOS implementation powered by AVFoundation, brought to you by [Alexey Pelykh](https://alexey-pelykh.com).
 
 ## Usage
 
 The plugin's API is intentionally kept similar to the [camera](https://pub.dev/packages/camera) package. See the
 [example](https://pub.dev/packages/uvccamera/example) for an app that uses the plugin.
+
+## iOS notes
+
+- Add `NSCameraUsageDescription` to your iOS app `Info.plist`.
+- iOS camera access is implemented with AVFoundation and supports the same Dart API exposed by this plugin.
