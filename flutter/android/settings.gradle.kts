@@ -9,9 +9,6 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
-        include(":lib")
-        project(":lib").projectDir = file("lib")
-
     }
 }
 dependencyResolutionManagement {
@@ -23,3 +20,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "UVCCamera-Flutter-Android"
+include(":lib")
+project(":lib").projectDir = file("lib")
