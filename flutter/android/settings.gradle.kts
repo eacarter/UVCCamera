@@ -9,6 +9,9 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+        include(":lib")
+        project(":lib").projectDir = file("lib")
+
     }
 }
 dependencyResolutionManagement {
