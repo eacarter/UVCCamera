@@ -4,12 +4,12 @@ import Foundation
 
 private enum UvcCameraError: Error {
     case invalidArgument(String)
-    case illegalState(String)
+    case unsupported(String)
     case notFound(String)
     case operationFailed(String)
 }
 
-private final class UvcCameraEventStreamHandler: NSObject, FlutterStreamHandler {
+private final class UvcCameraDeviceEventStreamHandler: NSObject, FlutterStreamHandler {
     private var sink: FlutterEventSink?
 
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
@@ -22,8 +22,18 @@ private final class UvcCameraEventStreamHandler: NSObject, FlutterStreamHandler 
         return nil
     }
 
-    func emit(_ event: [String: Any]) {
+    func emit(event: [String: Any]) {
         sink?(event)
+    }
+}
+
+private final class UvcCameraSimpleEventStreamHandler: NSObject, FlutterStreamHandler {
+    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        return nil
+    }
+
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        return nil
     }
 }
 
@@ -58,8 +68,6 @@ private final class UvcPhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDele
 }
 
 private final class UvcMovieFileOutputDelegate: NSObject, AVCaptureFileOutputRecordingDelegate {
-    var onFinished: ((Error?) -> Void)?
-
     func fileOutput(_ output: AVCaptureFileOutput,
                     didStartRecordingTo fileURL: URL,
                     from connections: [AVCaptureConnection]) {
@@ -69,7 +77,6 @@ private final class UvcMovieFileOutputDelegate: NSObject, AVCaptureFileOutputRec
                     didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection],
                     error: Error?) {
-        onFinished?(error)
     }
 }
 
@@ -81,18 +88,13 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
 
     private(set) var textureId: Int64?
 
-    var onRuntimeError: ((Error) -> Void)?
-    var onStatusMessage: ((String) -> Void)?
-
     private let textureRegistry: FlutterTextureRegistry
     private let videoOutput = AVCaptureVideoDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
     private let movieOutputDelegate = UvcMovieFileOutputDelegate()
     private let queue = DispatchQueue(label: "org.uvccamera.flutter.camera.session")
-
     private var photoDelegates: [UvcPhotoCaptureDelegate] = []
-    private var observers: [NSObjectProtocol] = []
 
     init(id: Int, device: AVCaptureDevice, textureRegistry: FlutterTextureRegistry) {
         self.id = id
@@ -102,7 +104,6 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 
     deinit {
-        removeObservers()
         if let textureId {
             textureRegistry.unregisterTexture(textureId)
         }
@@ -113,14 +114,14 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
         defer { captureSession.commitConfiguration() }
 
         let input = try AVCaptureDeviceInput(device: device)
-        guard captureSession.canAddInput(input) else {
+        if captureSession.canAddInput(input) {
+            captureSession.addInput(input)
+        } else {
             throw UvcCameraError.operationFailed("Unable to add camera input")
         }
-        captureSession.addInput(input)
 
-        let sessionPreset = Self.capturePreset(from: preset)
-        if captureSession.canSetSessionPreset(sessionPreset) {
-            captureSession.sessionPreset = sessionPreset
+        if captureSession.canSetSessionPreset(Self.capturePreset(from: preset)) {
+            captureSession.sessionPreset = Self.capturePreset(from: preset)
         }
 
         videoOutput.videoSettings = [
@@ -129,10 +130,11 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: queue)
 
-        guard captureSession.canAddOutput(videoOutput) else {
+        if captureSession.canAddOutput(videoOutput) {
+            captureSession.addOutput(videoOutput)
+        } else {
             throw UvcCameraError.operationFailed("Unable to add video output")
         }
-        captureSession.addOutput(videoOutput)
 
         if captureSession.canAddOutput(photoOutput) {
             captureSession.addOutput(photoOutput)
@@ -143,7 +145,6 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
         }
 
         textureId = textureRegistry.register(texture)
-        registerObservers()
     }
 
     func startRunning() {
@@ -188,11 +189,6 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
 
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let fileURL = directory.appendingPathComponent("uvccamera_\(UUID().uuidString).mov")
-        movieOutputDelegate.onFinished = { [weak self] error in
-            if let error {
-                self?.onRuntimeError?(error)
-            }
-        }
         movieOutput.startRecording(to: fileURL, recordingDelegate: movieOutputDelegate)
         return fileURL.path
     }
@@ -204,25 +200,25 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 
     func getSupportedModes() -> [[String: Any]] {
-        var knownModes = Set<String>()
-        var modes: [[String: Any]] = []
+        var modes = Set<String>()
+        var result: [[String: Any]] = []
 
         for format in device.formats {
-            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let description = format.formatDescription
+            let dimensions = CMVideoFormatDescriptionGetDimensions(description)
             let key = "\(dimensions.width)x\(dimensions.height)"
-            if knownModes.contains(key) {
+            if modes.contains(key) {
                 continue
             }
-
-            knownModes.insert(key)
-            modes.append([
+            modes.insert(key)
+            result.append([
                 "frameWidth": Int(dimensions.width),
                 "frameHeight": Int(dimensions.height),
                 "frameFormat": "yuyv"
             ])
         }
 
-        return modes.sorted { lhs, rhs in
+        return result.sorted { lhs, rhs in
             let lhsArea = (lhs["frameWidth"] as? Int ?? 0) * (lhs["frameHeight"] as? Int ?? 0)
             let rhsArea = (rhs["frameWidth"] as? Int ?? 0) * (rhs["frameHeight"] as? Int ?? 0)
             return lhsArea < rhsArea
@@ -273,40 +269,6 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
         }
     }
 
-    private func registerObservers() {
-        removeObservers()
-
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .AVCaptureSessionRuntimeError,
-            object: captureSession,
-            queue: .main
-        ) { [weak self] note in
-            let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error ?? UvcCameraError.operationFailed("Unknown session runtime error")
-            self?.onRuntimeError?(err)
-        })
-
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .AVCaptureSessionWasInterrupted,
-            object: captureSession,
-            queue: .main
-        ) { [weak self] _ in
-            self?.onStatusMessage?("interrupted")
-        })
-
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .AVCaptureSessionInterruptionEnded,
-            object: captureSession,
-            queue: .main
-        ) { [weak self] _ in
-            self?.onStatusMessage?("interruptionEnded")
-        })
-    }
-
-    private func removeObservers() {
-        observers.forEach(NotificationCenter.default.removeObserver)
-        observers.removeAll()
-    }
-
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
@@ -319,18 +281,24 @@ private final class UvcCameraSession: NSObject, AVCaptureVideoDataOutputSampleBu
     }
 }
 
+extension UvcCameraError {
+    static func illegalState(_ message: String) -> UvcCameraError {
+        .operationFailed(message)
+    }
+}
+
 public final class UvcCameraPlugin: NSObject, FlutterPlugin {
     private let nativeChannel: FlutterMethodChannel
-    private let deviceEventHandler = UvcCameraEventStreamHandler()
+    private let deviceEventHandler: UvcCameraDeviceEventStreamHandler
     private let messenger: FlutterBinaryMessenger
     private let textureRegistry: FlutterTextureRegistry
 
     private var cameraIdCounter = 0
     private var cameraSessions: [Int: UvcCameraSession] = [:]
 
-    private var errorEventHandlers: [Int: UvcCameraEventStreamHandler] = [:]
-    private var statusEventHandlers: [Int: UvcCameraEventStreamHandler] = [:]
-    private var buttonEventHandlers: [Int: UvcCameraEventStreamHandler] = [:]
+    private var errorEventHandlers: [Int: UvcCameraSimpleEventStreamHandler] = [:]
+    private var statusEventHandlers: [Int: UvcCameraSimpleEventStreamHandler] = [:]
+    private var buttonEventHandlers: [Int: UvcCameraSimpleEventStreamHandler] = [:]
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let plugin = UvcCameraPlugin(registrar: registrar)
@@ -355,6 +323,7 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
 
     init(registrar: FlutterPluginRegistrar) {
         nativeChannel = FlutterMethodChannel(name: "uvccamera/native", binaryMessenger: registrar.messenger())
+        deviceEventHandler = UvcCameraDeviceEventStreamHandler()
         messenger = registrar.messenger()
         textureRegistry = registrar.textures()
         super.init()
@@ -369,7 +338,7 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
         do {
             switch call.method {
             case "isSupported":
-                result(try isSupported())
+                result(true)
             case "getDevices":
                 result(try getDevices())
             case "requestDevicePermission":
@@ -382,22 +351,22 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             case "getCameraTextureId":
                 result(try getCameraTextureId(arguments: call.arguments))
             case "attachToCameraErrorCallback":
-                try attachEventChannel(prefix: "error_events", handlers: &errorEventHandlers, arguments: call.arguments)
+                try attachSimpleEventChannel(prefix: "error_events", handlers: &errorEventHandlers, arguments: call.arguments)
                 result(nil)
             case "detachFromCameraErrorCallback":
-                try detachEventChannel(handlers: &errorEventHandlers, arguments: call.arguments)
+                try detachSimpleEventChannel(handlers: &errorEventHandlers, arguments: call.arguments)
                 result(nil)
             case "attachToCameraStatusCallback":
-                try attachEventChannel(prefix: "status_events", handlers: &statusEventHandlers, arguments: call.arguments)
+                try attachSimpleEventChannel(prefix: "status_events", handlers: &statusEventHandlers, arguments: call.arguments)
                 result(nil)
             case "detachFromCameraStatusCallback":
-                try detachEventChannel(handlers: &statusEventHandlers, arguments: call.arguments)
+                try detachSimpleEventChannel(handlers: &statusEventHandlers, arguments: call.arguments)
                 result(nil)
             case "attachToCameraButtonCallback":
-                try attachEventChannel(prefix: "button_events", handlers: &buttonEventHandlers, arguments: call.arguments)
+                try attachSimpleEventChannel(prefix: "button_events", handlers: &buttonEventHandlers, arguments: call.arguments)
                 result(nil)
             case "detachFromCameraButtonCallback":
-                try detachEventChannel(handlers: &buttonEventHandlers, arguments: call.arguments)
+                try detachSimpleEventChannel(handlers: &buttonEventHandlers, arguments: call.arguments)
                 result(nil)
             case "getSupportedModes":
                 result(try getCameraSession(arguments: call.arguments).getSupportedModes())
@@ -409,7 +378,7 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             case "takePicture":
                 try takePicture(arguments: call.arguments, result: result)
             case "startVideoRecording":
-                try startVideoRecording(arguments: call.arguments, result: result)
+                result(try getCameraSession(arguments: call.arguments).startVideoRecording())
             case "stopVideoRecording":
                 try getCameraSession(arguments: call.arguments).stopVideoRecording()
                 result(nil)
@@ -421,26 +390,14 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    private func isSupported() throws -> Bool {
-        !discoverDevices().isEmpty
-    }
-
-    private func discoverDevices() -> [AVCaptureDevice] {
-        var deviceTypes: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
-        if #available(iOS 17.0, *) {
-            deviceTypes.append(.external)
-        }
-
+    private func getDevices() throws -> [String: Any] {
         let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: deviceTypes,
+            deviceTypes: [.builtInWideAngleCamera],
             mediaType: .video,
             position: .unspecified
         )
-        return discovery.devices
-    }
 
-    private func getDevices() throws -> [String: Any] {
-        Dictionary(uniqueKeysWithValues: discoverDevices().map { device in
+        return Dictionary(uniqueKeysWithValues: discovery.devices.map { device in
             (device.uniqueID, [
                 "name": device.uniqueID,
                 "deviceClass": 14,
@@ -474,22 +431,14 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             throw UvcCameraError.invalidArgument("deviceName and resolutionPreset are required")
         }
 
-        guard let device = discoverDevices().first(where: { $0.uniqueID == deviceName }) else {
+        guard let device = AVCaptureDevice(uniqueID: deviceName) else {
             throw UvcCameraError.notFound("Unable to find camera device '\(deviceName)'")
         }
 
         cameraIdCounter += 1
         let session = UvcCameraSession(id: cameraIdCounter, device: device, textureRegistry: textureRegistry)
-        session.onRuntimeError = { [weak self] error in
-            self?.emitError(cameraId: session.id, code: "OperationFailed", message: error.localizedDescription)
-        }
-        session.onStatusMessage = { [weak self] status in
-            self?.emitStatus(cameraId: session.id, event: status)
-        }
-
         try session.configureSession(preset: resolutionPreset)
         session.startRunning()
-
         cameraSessions[cameraIdCounter] = session
         return cameraIdCounter
     }
@@ -500,9 +449,6 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             throw UvcCameraError.notFound("Unable to find camera '\(cameraId)'")
         }
         session.stopRunning()
-        errorEventHandlers.removeValue(forKey: cameraId)
-        statusEventHandlers.removeValue(forKey: cameraId)
-        buttonEventHandlers.removeValue(forKey: cameraId)
     }
 
     private func getCameraTextureId(arguments: Any?) throws -> Int64 {
@@ -553,21 +499,9 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    private func startVideoRecording(arguments: Any?, result: @escaping FlutterResult) throws {
-        guard let arguments = arguments as? [String: Any],
-              let cameraId = arguments["cameraId"] as? Int,
-              let videoRecordingMode = arguments["videoRecordingMode"] as? [String: Any],
-              let session = cameraSessions[cameraId] else {
-            throw UvcCameraError.invalidArgument("cameraId and videoRecordingMode are required")
-        }
-
-        try session.setPreviewMode(videoRecordingMode)
-        result(try session.startVideoRecording())
-    }
-
-    private func attachEventChannel(
+    private func attachSimpleEventChannel(
         prefix: String,
-        handlers: inout [Int: UvcCameraEventStreamHandler],
+        handlers: inout [Int: UvcCameraSimpleEventStreamHandler],
         arguments: Any?
     ) throws {
         let cameraId = try getCameraId(arguments)
@@ -575,41 +509,18 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             return
         }
 
-        let handler = UvcCameraEventStreamHandler()
+        let handler = UvcCameraSimpleEventStreamHandler()
         let channel = FlutterEventChannel(name: "uvccamera/camera@\(cameraId)/\(prefix)", binaryMessenger: messenger)
         channel.setStreamHandler(handler)
         handlers[cameraId] = handler
     }
 
-    private func detachEventChannel(
-        handlers: inout [Int: UvcCameraEventStreamHandler],
+    private func detachSimpleEventChannel(
+        handlers: inout [Int: UvcCameraSimpleEventStreamHandler],
         arguments: Any?
     ) throws {
         let cameraId = try getCameraId(arguments)
         handlers.removeValue(forKey: cameraId)
-    }
-
-    private func emitError(cameraId: Int, code _: String, message: String) {
-        errorEventHandlers[cameraId]?.emit([
-            "cameraId": cameraId,
-            "error": [
-                "type": "previewInterrupted",
-                "reason": message
-            ]
-        ])
-    }
-
-    private func emitStatus(cameraId: Int, event: String) {
-        statusEventHandlers[cameraId]?.emit([
-            "cameraId": cameraId,
-            "payload": [
-                "statusClass": "control",
-                "event": 0,
-                "selector": 0,
-                "statusAttribute": "unknown",
-                "eventName": event
-            ]
-        ])
     }
 
     @objc private func onCaptureDeviceConnected(_ notification: Notification) {
@@ -617,7 +528,7 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             return
         }
 
-        deviceEventHandler.emit([
+        deviceEventHandler.emit(event: [
             "device": [
                 "name": device.uniqueID,
                 "deviceClass": 14,
@@ -634,7 +545,7 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             return
         }
 
-        deviceEventHandler.emit([
+        deviceEventHandler.emit(event: [
             "device": [
                 "name": device.uniqueID,
                 "deviceClass": 14,
@@ -644,12 +555,6 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             ],
             "type": "detached"
         ])
-
-        for (cameraId, session) in cameraSessions where session.device.uniqueID == device.uniqueID {
-            session.stopRunning()
-            cameraSessions.removeValue(forKey: cameraId)
-            emitError(cameraId: cameraId, code: "OperationFailed", message: "Camera device was disconnected")
-        }
     }
 
     private func asFlutterError(_ error: Error) -> FlutterError {
@@ -657,8 +562,8 @@ public final class UvcCameraPlugin: NSObject, FlutterPlugin {
             switch cameraError {
             case let .invalidArgument(message):
                 return FlutterError(code: "InvalidArgument", message: message, details: nil)
-            case let .illegalState(message):
-                return FlutterError(code: "IllegalState", message: message, details: nil)
+            case let .unsupported(message):
+                return FlutterError(code: "Unsupported", message: message, details: nil)
             case let .notFound(message):
                 return FlutterError(code: "NotFound", message: message, details: nil)
             case let .operationFailed(message):
