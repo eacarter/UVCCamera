@@ -6,6 +6,7 @@ issue_tracker: https://github.com/alexey-pelykh/UVCCamera/issues
 homepage: https://uvccamera.org
 platforms:
   android:
+  ios:
 
 environment:
   sdk: ^3.7.0
@@ -28,4 +29,6 @@ flutter:
     platforms:
       android:
         package: org.uvccamera.flutter
+        pluginClass: UvcCameraPlugin
+      ios:
         pluginClass: UvcCameraPlugin
